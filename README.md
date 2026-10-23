@@ -81,24 +81,28 @@ Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
 
 ## Qwen2.5-1.5B Setup, Inference, and Optimization Results
 
-This project uses vLLM for inference and serving. It does not retrain the Qwen base models. The two models compared here are:
+This project uses vLLM for inference and serving. It does not fully retrain the Qwen base model. The four models compared here are:
 
 1. FP16 base model: `Qwen/Qwen2.5-1.5B-Instruct`
 2. Official AWQ 4-bit quantized model: `Qwen/Qwen2.5-1.5B-Instruct-AWQ`
+3. PTQ AWQ 4-bit quantized model: `qwen2.5-1.5b-awq-custom`
+4. QAT-exported AWQ 4-bit model: `Qwen2.5-1.5B-Instruct-QAT-AWQ`
 
 ### Model composition
 
 - `Qwen/Qwen2.5-1.5B-Instruct` is an instruction-tuned Qwen2.5 model with approximately 1.5B parameters. Its FP16 weights are loaded directly by vLLM.
 - `Qwen/Qwen2.5-1.5B-Instruct-AWQ` is an official 4-bit AWQ pre-quantized model. It is not retrained in this project; vLLM loads it directly and detects its quantization configuration.
-- The two models belong to the same model family and have the same approximate size, making them suitable for comparison with the same prompts, sampling parameters, and hardware.
+- `qwen2.5-1.5b-awq-custom` is the PTQ AWQ model generated offline from the FP16 base model with `tools/quantization/quantize_qwen_awq.py`. It is saved as a `compressed-tensors` W4A16 checkpoint and then loaded by vLLM.
+- `Qwen2.5-1.5B-Instruct-QAT-AWQ` is exported after LoRA-QAT training from the FP16 base model. Its training forward pass uses 4-bit fake quantization, and the merged result is saved as a vLLM-compatible `compressed-tensors` W4A16 checkpoint.
+- The four models belong to the same model family and have the same approximate size, making them suitable for comparison with the same prompts, sampling parameters, and hardware.
 
 ### Environment and serving
 
-The following commands correspond to the project's RTX 3060 12GB test environment. The two services use the same port, so stop the current service before testing the other model.
+The following commands correspond to the project's RTX 3060 12GB test environment. The four services use the same port, so stop the current service before testing the other model.
 
 ```bash
 cd /home/dxh/DXH/code/vllm-main
-source .venv/bin/activate
+source vllm-env/bin/activate
 
 export VLLM_USE_MODELSCOPE=True
 export VLLM_USE_FLASHINFER_SAMPLER=0
@@ -121,7 +125,77 @@ vllm serve Qwen/Qwen2.5-1.5B-Instruct-AWQ \
   --port 8000
 ```
 
+Start the PTQ AWQ model:
+
+```bash
+vllm serve ./Qwen2.5-1.5B-Instruct-AWQ-custom \
+  --served-model-name qwen2.5-1.5b-awq-custom \
+  --gpu-memory-utilization 0.80 \
+  --port 8000
+```
+
+Start the QAT-exported AWQ model:
+
+```bash
+vllm serve ./Qwen2.5-1.5B-Instruct-QAT-AWQ \
+  --served-model-name qwen2.5-1.5b-qat-awq \
+  --gpu-memory-utilization 0.80 \
+  --port 8000
+```
+
+In the CUDA 11.8 environment used for this project, keep `VLLM_USE_FLASHINFER_SAMPLER=0` to avoid the unsupported `--compress-mode=size` compiler option.
+
 `--gpu-memory-utilization 0.80` limits vLLM's GPU memory usage and leaves room for the KV cache and runtime overhead. The AWQ model already contains its quantization configuration, so `--quantization awq` is normally not required.
+
+### PTQ AWQ quantization command
+
+AWQ is post-training quantization (PTQ), not language-model retraining. Run the offline quantization in the separate quantization environment:
+
+```bash
+cd /home/dxh/DXH/code/vllm-main
+source quant-awq-env/bin/activate
+uv pip install llmcompressor transformers datasets
+
+quant-awq-env/bin/python \
+  tools/quantization/quantize_qwen_awq.py \
+  --model Qwen/Qwen2.5-1.5B-Instruct \
+  --output ./Qwen2.5-1.5B-Instruct-AWQ-custom \
+  --calibration-file /home/dxh/DXH/code/vllm-main/calibration.jsonl \
+  --calibration-samples 512 \
+  --max-seq-length 2048
+```
+
+`calibration.jsonl` must contain one JSON object per line with a non-empty `text` field. The resulting checkpoint uses `compressed-tensors`, 4-bit `W4A16`, `group_size=128`, and keeps `lm_head` unquantized.
+
+### QAT 4-bit training and export
+
+The repository also provides a memory-friendly LoRA-QAT path. The FP16 base
+weights remain frozen, LoRA parameters are trained while the forward pass uses
+4-bit fake quantization, and the merged result is exported as a vLLM-compatible
+`compressed-tensors` W4A16 checkpoint. This is QAT training followed by AWQ
+export; it is not full-parameter retraining.
+
+```bash
+cd /home/dxh/DXH/code/vllm-main
+source quant-awq-env/bin/activate
+
+quant-awq-env/bin/python \
+  tools/quantization/qat_qwen_awq.py \
+  --model Qwen/Qwen2.5-1.5B-Instruct \
+  --output ./Qwen2.5-1.5B-Instruct-QAT-AWQ \
+  --calibration-file /home/dxh/DXH/code/vllm-main/calibration.jsonl \
+  --calibration-samples 512 \
+  --max-seq-length 512 \
+  --steps 200 \
+  --batch-size 1 \
+  --gradient-accumulation-steps 8 \
+  --lora-rank 8 \
+  --group-size 128
+```
+
+Use a small `--steps` value first as a smoke test. The default LoRA-QAT
+configuration is intended for a 12GB GPU; increase steps only after checking
+loss and available memory.
 
 ### Inference commands
 
@@ -159,6 +233,22 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+PTQ AWQ inference:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen2.5-1.5b-awq-custom",
+    "messages": [{
+      "role": "user",
+      "content": "Please introduce Beijing's history, culture, and modern development in about 300 Chinese characters."
+    }],
+    "temperature": 0.0,
+    "max_tokens": 512
+  }'
+```
+
 To prevent responses from being too short, vLLM's `min_tokens` extension parameter can be used together with a reasonable `max_tokens` value. Avoid setting an unnecessarily high minimum for long-form AWQ generation, because it may amplify repetition:
 
 ```json
@@ -170,23 +260,31 @@ To prevent responses from being too short, vLLM's `min_tokens` extension paramet
 
 ### Benchmark and quality evaluation commands
 
-The repository scripts measure GPU memory, single-request decoding speed, 32-request batch throughput, and perplexity (PPL). Run each model separately so that both models do not occupy the GPU at the same time:
+The repository scripts measure GPU memory, single-request decoding speed, 32-request batch throughput, and perplexity (PPL). They support `fp16`, `awq`, `custom`, and `qat`; run each model separately so that multiple models do not occupy the GPU at the same time:
 
 ```bash
 cd /home/dxh/DXH/code/vllm-main
-source .venv/bin/activate
+source vllm-env/bin/activate
 export VLLM_USE_MODELSCOPE=True
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
-.venv/bin/python test/quant/bench_one.py \
+vllm-env/bin/python test/quant/bench_one.py \
   fp16 test/quant/result_fp16.json
-.venv/bin/python test/quant/bench_one.py \
+vllm-env/bin/python test/quant/bench_one.py \
   awq test/quant/result_awq.json
+vllm-env/bin/python test/quant/bench_one.py \
+  custom test/quant/result_custom.json
+vllm-env/bin/python test/quant/bench_one.py \
+  qat test/quant/result_qat.json
 
-.venv/bin/python test/quant/ppl_one.py \
+vllm-env/bin/python test/quant/ppl_one.py \
   fp16 test/quant/ppl_fp16.json
-.venv/bin/python test/quant/ppl_one.py \
+vllm-env/bin/python test/quant/ppl_one.py \
   awq test/quant/ppl_awq.json
+vllm-env/bin/python test/quant/ppl_one.py \
+  custom test/quant/ppl_custom.json
+vllm-env/bin/python test/quant/ppl_one.py \
+  qat test/quant/ppl_qat.json
 ```
 
 These scripts create a vLLM engine directly and do not require an HTTP server to be running.
@@ -195,20 +293,26 @@ These scripts create a vLLM engine directly and do not require an HTTP server to
 
 Test conditions: RTX 3060 12GB, vLLM 0.30.0, CUDA Graph enabled, and `gpu_memory_utilization=0.80`.
 
-| Metric | FP16 | AWQ 4-bit | AWQ relative to FP16 |
-| --- | ---: | ---: | ---: |
-| Weight file size | 2.9 GB | 1.6 GB | Reduced by about 45% |
-| Single-request TTFT | 13 ms | 8 ms | Reduced by about 38% |
-| Single-request decoding | 79.8 tok/s | 185.1 tok/s | Increased by about 132% |
-| Throughput, 32 concurrent requests | 1754 tok/s | 3486 tok/s | Increased by about 99% |
-| PPL, 8 Chinese/English texts and 401 tokens | 4.027 | 4.843 | Degraded by about 20.3% |
+| Metric | FP16 | Official AWQ 4-bit | PTQ AWQ 4-bit | QAT AWQ 4-bit |
+| --- | ---: | ---: | ---: | ---: |
+| Weight file size | 2.9 GB | 1.6 GB | 1.06 GiB | 1.06 GiB |
+| vLLM model loading memory | Not recorded separately | Not recorded separately | 1.12 GiB | 1.12 GiB |
+| Single-request TTFT | 13 ms | 8 ms | 9 ms | 8 ms |
+| Single-request decoding | 79.8 tok/s | 185.1 tok/s | 205.4 tok/s | 207.1 tok/s |
+| Throughput, 32 concurrent requests | 1754 tok/s | 3486 tok/s | 3982.9 tok/s | 3940.4 tok/s |
+| PPL, 8 Chinese/English texts and 401 tokens | 4.027 | 4.843 | 4.972 | 5.398 |
 
 Results:
 
 - **Speed:** AWQ reduces memory-bandwidth reads through 4-bit weights. On the RTX 3060, single-request decoding is about 2.3x faster and 32-request throughput is about 2x higher than FP16.
 - **Memory:** AWQ reduces the weight files from 2.9 GB to 1.6 GB, leaving more room for the KV cache and improving the feasibility of deploying larger models on a 12GB GPU. Since both tests use `gpu_memory_utilization=0.80`, peak allocated memory is close to the reservation limit and does not show the full weight-memory difference.
-- **Quality:** FP16 naturally stopped after about 381 tokens for the test prompt. AWQ reached the 512-token limit and showed sentence-level repetition at the end. PPL increased from 4.027 to 4.843, indicating measurable quality degradation from 4-bit quantization.
-- **Recommended use:** Prefer FP16 for a 1.5B model when it fits on a 12GB GPU. Prefer AWQ when memory is constrained, throughput is the priority, or models of 7B and larger must be deployed.
+- **Quality:** FP16 naturally stopped after about 381 tokens for the test prompt. The official AWQ model reached the 512-token limit and showed sentence-level repetition at the end. PPL increased from 4.027 to 4.843, indicating measurable quality degradation from 4-bit quantization. The PTQ model's PPL was 4.972.
+- **PTQ model:** The PTQ AWQ model completed quantization, saving, vLLM loading, and the full benchmark. Its TTFT was 9 ms, decoding speed was 205.4 tok/s, 32-request throughput was 3982.9 tok/s, and PPL was 4.972. The startup log reported about 1.12 GiB for model loading and about 279,920 KV-cache tokens.
+- **PTQ versus official AWQ:** The PTQ model was about 11% faster for single-request decoding and about 14% faster in 32-request throughput, but TTFT was 1 ms higher and PPL was about 2.7% higher. These are local results from different runs and are reference values rather than cross-machine guarantees.
+- **QAT model:** The QAT AWQ model completed vLLM loading and the full benchmark. Its TTFT was 8 ms, decoding speed was 207.1 tok/s, 32-request throughput was 3940.4 tok/s, and PPL was 5.398; its weight file was 1.06 GiB and model loading used 1.12 GiB.
+- **Storage and loading memory:** PTQ AWQ and QAT AWQ are both exported in the same `compressed-tensors` W4A16 format, so both have a 1.06 GiB weight file and use 1.12 GiB for vLLM model loading. QAT improves adaptation to quantization error during training; it does not further reduce the final 4-bit checkpoint size.
+- **QAT versus PTQ:** QAT was about 0.8% faster for single-request decoding but about 1.1% lower in 32-request throughput. Its PPL increased from 4.972 to 5.398, so this run did not show a quality or throughput advantage over PTQ.
+- **Recommended use:** Prefer FP16 for a 1.5B model when it fits on a 12GB GPU. Prefer official or PTQ AWQ when memory is constrained or throughput is the priority. The QAT path is currently useful for validating quantization-aware training rather than as the best measured deployment variant.
 
 Full report and raw results:
 
@@ -217,6 +321,10 @@ Full report and raw results:
 - [AWQ benchmark result](test/quant/result_awq.json)
 - [FP16 PPL result](test/quant/ppl_fp16.json)
 - [AWQ PPL result](test/quant/ppl_awq.json)
+- [PTQ AWQ benchmark result](test/quant/result_custom.json)
+- [PTQ AWQ PPL result](test/quant/ppl_custom.json)
+- [PTQ AWQ quantization script](tools/quantization/quantize_qwen_awq.py)
+- [QAT training and export script](tools/quantization/qat_qwen_awq.py)
 
 ### Raw result summary
 
@@ -264,14 +372,61 @@ AWQ raw benchmark:
 }
 ```
 
+PTQ AWQ raw benchmark:
+
+```json
+{
+  "model": "./Qwen2.5-1.5B-Instruct-AWQ-custom",
+  "gpu_peak_mib": 10481.6,
+  "single": {
+    "out_tokens": 415,
+    "ttft_s": 0.009,
+    "e2e_s": 2.025,
+    "decode_tps": 205.4
+  },
+  "batch": {
+    "num_requests": 32,
+    "elapsed_s": 1.93,
+    "total_out_tokens": 7700,
+    "throughput_tok_s": 3982.9
+  }
+}
+```
+
+QAT AWQ raw benchmark:
+
+```json
+{
+  "variant": "qat",
+  "model": "./Qwen2.5-1.5B-Instruct-QAT-AWQ",
+  "gpu_peak_mib": 10352.1,
+  "single": {
+    "out_tokens": 512,
+    "ttft_s": 0.008,
+    "e2e_s": 2.476,
+    "decode_tps": 207.1
+  },
+  "batch": {
+    "num_requests": 32,
+    "elapsed_s": 1.92,
+    "total_out_tokens": 7561,
+    "throughput_tok_s": 3940.4
+  }
+}
+```
+
 Raw PPL results:
 
 | Model | Evaluation texts | Evaluation tokens | PPL |
 | --- | ---: | ---: | ---: |
 | `Qwen/Qwen2.5-1.5B-Instruct` | 8 | 401 | 4.027 |
 | `Qwen/Qwen2.5-1.5B-Instruct-AWQ` | 8 | 401 | 4.843 |
+| `./Qwen2.5-1.5B-Instruct-AWQ-custom` | 8 | 401 | 4.972 |
+| `./Qwen2.5-1.5B-Instruct-QAT-AWQ` | 8 | 401 | 5.398 |
 
 With the same Beijing history, culture, and modern development prompt, FP16 naturally stopped after 381 tokens. AWQ reached the 512-token limit and ended with sentence-level repetition such as “Beijing's history, culture, and modern development are intertwined...”. This is consistent with AWQ PPL increasing from 4.027 to 4.843.
+
+The PTQ AWQ model used the same prompt, concurrency, and sampling parameters. Compared with official AWQ, its decoding speed was 205.4 versus 185.1 tok/s and its 32-request throughput was 3982.9 versus 3486 tok/s; its PPL was 4.972 versus 4.843. The QAT AWQ model measured 8 ms TTFT, 207.1 tok/s decoding, 3940.4 tok/s at 32-request throughput, and 5.398 PPL. Compared with PTQ, QAT was about 0.8% faster in single-request decoding but about 1.1% lower in batch throughput, with higher PPL. Because the four measured model runs were not performed in the same second, absolute speeds should be treated as local reference measurements rather than performance guarantees across machines.
 
 ## Contributing
 

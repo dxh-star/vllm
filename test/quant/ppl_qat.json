@@ -1,0 +1,7 @@
+{
+  "variant": "qat",
+  "model": "/home/dxh/DXH/code/vllm-main/Qwen2.5-1.5B-Instruct-QAT-AWQ",
+  "corpus_texts": 8,
+  "corpus_tokens": 401,
+  "perplexity": 5.398
+}

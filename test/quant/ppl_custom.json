@@ -1,0 +1,7 @@
+{
+  "variant": "custom",
+  "model": "./Qwen2.5-1.5B-Instruct-AWQ-custom",
+  "corpus_texts": 8,
+  "corpus_tokens": 401,
+  "perplexity": 4.972
+}

@@ -158,6 +158,12 @@ celerybeat.pid
 # Environments
 .env
 .venv
+
+# Local quantization artifacts (keep code and benchmark results in Git).
+Qwen2.5-1.5B-Instruct-AWQ-custom/
+Qwen2.5-1.5B-Instruct-QAT-AWQ/
+calibration.jsonl
+test/quant/*.log
 env/
 venv/
 ENV/

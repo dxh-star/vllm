@@ -1,11 +1,12 @@
 """Perplexity comparison for Qwen2.5-1.5B-Instruct fp16 vs AWQ.
 
 Uses vLLM prompt_logprobs so both variants are measured identically.
-Usage: python ppl_one.py {fp16|awq} {out.json}
+Usage: python ppl_one.py {fp16|awq|custom|qat} {out.json}
 """
 
 import json
 import math
+import os
 import sys
 
 from vllm import LLM, SamplingParams
@@ -16,6 +17,12 @@ OUT_PATH = sys.argv[2]
 MODEL = {
     "fp16": "Qwen/Qwen2.5-1.5B-Instruct",
     "awq": "Qwen/Qwen2.5-1.5B-Instruct-AWQ",
+    "custom": os.environ.get(
+        "VLLM_CUSTOM_MODEL", "./Qwen2.5-1.5B-Instruct-AWQ-custom"
+    ),
+    "qat": os.environ.get(
+        "VLLM_QAT_MODEL", "./Qwen2.5-1.5B-Instruct-QAT-AWQ"
+    ),
 }[VARIANT]
 
 # Fixed eval corpus: varied Chinese/English passages.

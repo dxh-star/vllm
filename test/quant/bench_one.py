@@ -1,10 +1,11 @@
-"""Benchmark Qwen2.5-1.5B-Instruct fp16 vs AWQ: memory, speed, quality.
+"""Benchmark Qwen2.5-1.5B-Instruct variants: memory, speed, quality.
 
-Run one model per process (fp16|awq), save results to JSON.
-Usage: .venv python bench_one.py {fp16|awq} {out.json}
+Run one model per process (fp16|awq|custom|qat), save results to JSON.
+Usage: .venv python bench_one.py {fp16|awq|custom|qat} {out.json}
 """
 
 import json
+import os
 import sys
 import threading
 import time
@@ -17,6 +18,12 @@ OUT_PATH = sys.argv[2]
 MODEL = {
     "fp16": "Qwen/Qwen2.5-1.5B-Instruct",
     "awq": "Qwen/Qwen2.5-1.5B-Instruct-AWQ",
+    "custom": os.environ.get(
+        "VLLM_CUSTOM_MODEL", "./Qwen2.5-1.5B-Instruct-AWQ-custom"
+    ),
+    "qat": os.environ.get(
+        "VLLM_QAT_MODEL", "./Qwen2.5-1.5B-Instruct-QAT-AWQ"
+    ),
 }[VARIANT]
 
 
