@@ -1,0 +1,7 @@
+{
+  "variant": "fp16",
+  "model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "corpus_texts": 8,
+  "corpus_tokens": 401,
+  "perplexity": 4.027
+}

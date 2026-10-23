@@ -1,0 +1,38 @@
+cd ~
+source ~/DXH/code/vllm-main/vllm-env/bin/activate
+export CUDA_HOME="$(dirname "$(dirname "$(find "$VIRTUAL_ENV" -name nvcc -type f | head -1)")")"
+export VLLM_USE_MODELSCOPE=True
+export VLLM_USE_FLASHINFER_SAMPLER=0
+
+vllm serve Qwen/Qwen2.5-1.5B-Instruct \
+    --gpu-memory-utilization 0.80 \
+    --port 8000
+
+
+
+
+
+
+1. 改 prompt 明确要长度（最有效）
+让模型知道你要长回答：
+
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen2.5-1.5B-Instruct-AWQ",
+    "messages": [{"role": "user", "content": "请用300字左右的篇幅介绍北京的历史、文化和现代发展"}],
+    "max_tokens": 512
+  }'
+
+2. 用 min_tokens 强制保底长度（vLLM 扩展参数）
+就算模型想提前停，min_tokens 也会让它继续生成到指定长度再停：
+
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen2.5-1.5B-Instruct-AWQ",
+    "messages": [{"role": "user", "content": "介绍一下北京"}],
+    "max_tokens": 512,
+    "min_tokens": 200
+  }'
+
