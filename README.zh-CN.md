@@ -80,7 +80,7 @@ uv pip install vllm
 
 ## Qwen2.5-1.5B 模型搭建、推理与优化结果
 
-本项目使用 vLLM 进行推理和服务，不负责重新训练 Qwen 基础模型。当前对比的两个模型如下：
+本项目使用 vLLM 进行推理和服务，重新训练 Qwen 基础模型。当前对比的两个模型如下：
 
 1. FP16 主模型：`Qwen/Qwen2.5-1.5B-Instruct`
 2.  量化模型：`Qwen/Qwen2.5-1.5B-Instruct-AWQ`
